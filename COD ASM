@@ -1,0 +1,265 @@
+; ==========================================
+; DEFINIRE PINI SI ETICHETE
+; ==========================================
+RS          equ P3.0
+RW          equ P3.1
+EN          equ P3.2
+LCD         equ P2
+
+PLUS        equ P0.0
+MINUS       equ P0.1
+
+ADC_START   equ P3.3
+ADC_EOC     equ P3.4
+ADC_CLOCK   equ P3.5    ; Ceasul generat de Timer 1 pentru ADC
+ADC_DATE    equ P1
+
+RELEU       equ P3.7    ; Comanda catre baza tranzistorului (Centrala)
+
+; ==========================================
+; VECTORII DE RESET SI INTRERUPERI
+; ==========================================
+org 0000h
+    JMP START
+
+org 001Bh               ; Vectorul de intrerupere pentru Timer 1
+    CPL ADC_CLOCK       
+    RETI                ; Intoarcere din intrerupere
+
+; ==========================================
+; INITIALIZARE PROGRAM
+; ==========================================
+org 0030h
+START:
+    
+    ; Timer 1 in Mod 2 (Auto-Reload 8-biti) pentru ceas ADC
+    ; Timer 0 in Mod 1 (16-biti) pentru intarzieri (delay)
+    MOV TMOD, #21H  
+
+    
+    MOV TH1, #-46       
+    MOV TL1, #-46       
+    SETB TR1            ; Porneste Timer-ul 1
+
+    ; Activare Intreruperi
+    MOV IE, #88H        ; EA=1 (Global) si ET1=1 (Timer 1 Enable)
+
+    
+    MOV R0, #20         ; Temperatura Setata initiala (20 grade)
+    MOV R1, #0          ; Valoare initiala senzor
+    
+    ACALL delay_50ms
+    
+    ; Initializare LCD HD44780
+    MOV A, #38H         ; Setare: 8-biti, 2 linii, font 5x7
+    ACALL TRIMITERE_COMANDA
+    MOV A, #0CH         ; Display ON, Cursor OFF
+    ACALL TRIMITERE_COMANDA
+    MOV A, #01H         ; Sterge tot ecranul
+    ACALL TRIMITERE_COMANDA
+    MOV A, #06H         ; Seteaza scrierea de la stanga la dreapta
+    ACALL TRIMITERE_COMANDA
+
+; ==========================================
+; BUCLA PRINCIPALA
+; ==========================================
+main_loop:
+    acall CITESTE_ADC
+    acall VERIFICA_BUT
+    acall AFISARE
+    acall CONTROL_CENTRALA
+    acall delay_50ms
+    sjmp main_loop
+
+; ==========================================
+; LOGICA RELEULUI (CENTRALA)
+; ==========================================
+CONTROL_CENTRALA:
+    
+    ; Trebuie sa inmultim valoarea Setata  cu 2 pt a le putea compara corect.
+    MOV A, R0
+    CLR C
+    RLC A               ; Inmultire la stanga cu 2
+    MOV B, A            
+    
+    MOV A, R1           
+    CJNE A, B, COMPARA_TEMP
+    
+    CLR RELEU
+    SJMP GATA_CONTROL
+
+COMPARA_TEMP:
+    JC PORNESTE_CENTRALA  
+    
+    CLR RELEU
+    SJMP GATA_CONTROL
+
+PORNESTE_CENTRALA:
+    SETB RELEU          
+
+GATA_CONTROL:
+    RET
+
+; ==========================================
+; RUTINE ADC SI BUTOANE
+; ==========================================
+CITESTE_ADC:
+    clr ADC_START
+    setb ADC_START
+    acall onemil
+    acall onemil
+    clr ADC_START
+    acall onemil 
+    acall onemil
+
+asteptare_conversie:
+    jnb ADC_EOC, asteptare_conversie
+
+    mov A, ADC_DATE
+    mov B, #81
+    mul AB
+    mov R1, B           ; Salvare byte superior (impartire automata la 256)
+    ret
+
+VERIFICA_BUT:
+    JB PLUS, VERIFICA_MINUS  
+    ACALL delay_20ms         ; debouncing
+ASTEPTARE_ELIBERARE_P:
+    JNB PLUS, ASTEPTARE_ELIBERARE_P
+    INC R0
+    CJNE R0, #50, VERIFICA_MINUS
+    MOV R0, #49              ; Limita max 49 grade
+    
+VERIFICA_MINUS:
+    JB MINUS, GATA_BUTOANE   
+    ACALL delay_20ms
+ASTEPTARE_ELIBERARE_M:
+    JNB MINUS, ASTEPTARE_ELIBERARE_M 
+    DEC R0                 
+    CJNE R0, #0FFh, GATA_BUTOANE 
+    MOV R0, #0               ; Limita min 0 grade
+    
+GATA_BUTOANE:
+    RET
+
+; ==========================================
+; RUTINE AFISARE LCD
+; ==========================================
+AFISARE:
+    ; LINIA 1
+    MOV A, #80H         
+    ACALL TRIMITERE_COMANDA
+    MOV DPTR, #TEXT_SET 
+    acall afisare_text
+    
+    mov A, R0
+    mov B, #10
+    div AB
+    add A, #30h
+    acall TRIMITERE_DATE
+    mov A, B
+    add A, #30h
+    acall TRIMITERE_DATE
+
+    ; LINIA 2
+    MOV A, #0C0h          
+    acall TRIMITERE_COMANDA
+    MOV DPTR, #TEXT_SENZ
+    acall afisare_text
+    
+    MOV A, R1                
+    CLR C
+    RRC A                    ; Impartim la 2 pentru partea intreaga
+    
+    MOV B, #10
+    DIV AB
+    ADD A, #30H
+    ACALL TRIMITERE_DATE      
+    MOV A, B
+    ADD A, #30H
+    ACALL TRIMITERE_DATE       
+    
+    MOV A, #'.'              
+    ACALL TRIMITERE_DATE
+    
+    MOV A, R1
+    JB ACC.0, E_PUNCT_CINCI  
+    MOV A, #'0'              
+    SJMP AFIS_ZEC
+E_PUNCT_CINCI:
+    MOV A, #'5'
+AFIS_ZEC:
+    ACALL TRIMITERE_DATE
+    RET
+
+afisare_text:
+    CLR A
+    MOVC A, @A+DPTR     
+    JZ GATA_TEXT        
+    acall TRIMITERE_DATE
+    INC DPTR            
+    SJMP AFISARE_TEXT
+GATA_TEXT:
+    RET
+
+TRIMITERE_COMANDA:
+    clr RS
+    clr RW
+    MOV LCD , A
+    setb EN
+    acall ONEMIL
+    acall ONEMIL
+    clr EN
+    acall ONEMIL
+    acall ONEMIL
+    RET
+
+TRIMITERE_DATE:
+    SETB RS       
+    CLR RW
+    MOV LCD, A
+    SETB EN
+    ACALL ONEMIL
+    ACALL ONEMIL
+    CLR EN
+    ACALL ONEMIL
+    ACALL ONEMIL
+    RET
+
+; ==========================================
+; RUTINE DE INTARZIERE BAZATE PE TIMER 0
+; ==========================================
+ONEMIL:
+    
+    MOV TH0, #0FCH
+    MOV TL0, #066H
+    SETB TR0            ; Porneste Timerul 0
+ASTEAPTA_TIMER:
+    JNB TF0, ASTEAPTA_TIMER 
+    CLR TR0             ; Opreste Timerul
+    CLR TF0             ; Sterge flag-ul
+    RET
+
+delay_50ms:
+    PUSH 07H            
+    MOV R7, #50         
+BUCLA_50:
+    ACALL ONEMIL
+    DJNZ R7, BUCLA_50
+    POP 07H             
+    RET
+
+delay_20ms:
+    PUSH 07H
+    MOV R7, #20         
+BUCLA_20:
+    ACALL ONEMIL
+    DJNZ R7, BUCLA_20
+    POP 07H
+    RET
+
+; ==========================================
+; DATE TEXT MEMORIE
+; ==========================================
+TEXT_SET: DB 'Temp SETATA:', 0
+TEXT_SENZ: DB 'TEMP SENZOR:', 0
