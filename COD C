@@ -1,0 +1,124 @@
+#include <reg51.h>
+
+sbit RS = P3^0;
+sbit RW = P3^1;
+sbit EN = P3^2;
+#define LCD P2
+
+sbit PLUS = P0^0;
+sbit MINUS = P0^1;
+
+sbit ADC_START = P3^3;
+sbit ADC_EOC = P3^4;
+sbit ADC_CLOCK = P3^5;
+#define ADC_DATE P1
+
+sbit RELEU = P3^7;
+
+unsigned char temp_setata = 20;
+unsigned char temp_senzor = 0;
+
+// 1. Intrerupere Timer 1 pentru generare ceas ADC (~10kHz)
+void timer1_isr() interrupt 3 {
+    ADC_CLOCK = ~ADC_CLOCK;
+}
+
+// 2. Intarziere hardware precisa de 1ms la 11.0592 MHz
+void delay_1ms() {
+    TH0 = 0xFC;
+    TL0 = 0x66;
+    TR0 = 1;
+    while (!TF0);
+    TR0 = 0;
+    TF0 = 0;
+}
+
+void delay_ms(unsigned int ms) {
+    while(ms--) delay_1ms();
+}
+
+void TRIMITERE_COMANDA(unsigned char cmd) {
+    RS = 0; RW = 0; LCD = cmd;
+    EN = 1; delay_ms(2); EN = 0; delay_ms(2);
+}
+
+void TRIMITERE_DATE(unsigned char dat) {
+    RS = 1; RW = 0; LCD = dat;
+    EN = 1; delay_ms(2); EN = 0; delay_ms(2);
+}
+
+void afisare_text(char *sir) {
+    while(*sir) TRIMITERE_DATE(*sir++);
+}
+
+// 3. Citire si scalare ADC
+void CITESTE_ADC() {
+    ADC_START = 0; ADC_START = 1; delay_ms(2); ADC_START = 0; delay_ms(2);
+    while (ADC_EOC == 0);
+    temp_senzor = (unsigned char)(((unsigned int)ADC_DATE * 81) >> 8);
+}
+
+// 4. Verificare butoane cu debouncing si limite (0-49)
+void VERIFICA_BUT() {
+    if (PLUS == 0) {
+        delay_ms(20);
+        if (PLUS == 0) {
+            while(PLUS == 0);
+            if (temp_setata < 49) temp_setata++;
+        }
+    }
+    if (MINUS == 0) {
+        delay_ms(20);
+        if (MINUS == 0) {
+            while(MINUS == 0);
+            if (temp_setata > 0) temp_setata--;
+        }
+    }
+}
+
+// 5. Controlul centralei (Termostat)
+void CONTROL_CENTRALA() {
+    if (temp_senzor < (temp_setata * 2)) {
+        RELEU = 1;
+    } else {
+        RELEU = 0;
+    }
+}
+
+// 6. Afisare pe LCD a ambelor temperaturi
+void AFISARE() {
+    TRIMITERE_COMANDA(0x80);
+    afisare_text("Temp SETATA:");
+    TRIMITERE_DATE((temp_setata / 10) + '0');
+    TRIMITERE_DATE((temp_setata % 10) + '0');
+
+    TRIMITERE_COMANDA(0xC0);
+    afisare_text("TEMP SENZOR:");
+    TRIMITERE_DATE(((temp_senzor / 2) / 10) + '0');
+    TRIMITERE_DATE(((temp_senzor / 2) % 10) + '0');
+    TRIMITERE_DATE('.');
+    TRIMITERE_DATE((temp_senzor % 2) ? '5' : '0');
+}
+
+// 7. Configurare registri si bucla principala
+void main() {
+    TMOD = 0x21; // Timer 1 Mod 2 (Auto-Reload), Timer 0 Mod 1 (16-bit)
+    TH1 = -46;   // Valoare reload pt 10kHz la 11.0592MHz
+    TL1 = -46;
+    TR1 = 1;     // Pornire Timer 1
+    IE = 0x88;   // Activare intreruperi globale si Timer 1
+
+    delay_ms(50);
+    TRIMITERE_COMANDA(0x38);
+    TRIMITERE_COMANDA(0x0C);
+    TRIMITERE_COMANDA(0x01);
+    TRIMITERE_COMANDA(0x06);
+
+    while(1) {
+        CITESTE_ADC();
+        VERIFICA_BUT();
+        AFISARE();
+        CONTROL_CENTRALA();
+        delay_ms(50);
+    }
+}
